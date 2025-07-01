@@ -75,14 +75,17 @@ func init() {
 		log.Fatal("FATAL: OTEL_INGEST_TOKEN environment variable is not set.")
 	}
 
-	budgetBytesStr := os.Getenv("MAX_BYTES_PER_WINDOW")
-	if budgetBytesStr == "" {
-		log.Fatal("FATAL: MAX_BYTES_PER_WINDOW environment variable is not set.")
+	// Read budget in Megabytes for user-friendliness.
+	budgetMegabytesStr := os.Getenv("MAX_MEGABYTES_PER_WINDOW")
+	if budgetMegabytesStr == "" {
+		log.Fatal("FATAL: MAX_MEGABYTES_PER_WINDOW environment variable is not set.")
 	}
-	budgetBytes, err = strconv.ParseInt(budgetBytesStr, 10, 64)
+	budgetMegabytes, err := strconv.ParseInt(budgetMegabytesStr, 10, 64)
 	if err != nil {
-		log.Fatalf("FATAL: Invalid MAX_BYTES_PER_WINDOW: %v", err)
+		log.Fatalf("FATAL: Invalid MAX_MEGABYTES_PER_WINDOW: %v", err)
 	}
+	// Convert megabytes to bytes for internal calculations.
+	budgetBytes = budgetMegabytes * 1000 * 1000
 
 	budgetWindowType = strings.ToLower(os.Getenv("BUDGET_WINDOW_TYPE"))
 	if budgetWindowType != "hourly" && budgetWindowType != "daily" {
@@ -111,7 +114,6 @@ func init() {
 		log.Fatal("FATAL: REDIS_URL environment variable is not set.")
 	}
 
-	// Parse the Redis URL. Use a different variable name to avoid conflict.
 	parsedRedisURL, err := url.Parse(redisURLStr)
 	if err != nil {
 		log.Fatalf("FATAL: Invalid REDIS_URL: %v", err)
@@ -150,7 +152,6 @@ func init() {
 }
 
 func main() {
-	// Use a new ServeMux to avoid registering handlers on the DefaultServeMux.
 	mux := http.NewServeMux()
 	server := &http.Server{
 		Addr:              ":4318",
@@ -158,20 +159,16 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// Add a health check endpoint for orchestrators like Kubernetes.
 	mux.HandleFunc("/_healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	// Add a metrics endpoint for Prometheus.
 	mux.Handle("/metrics", promhttp.Handler())
 
 	mux.HandleFunc("/v1/traces", handleRequest)
 	mux.HandleFunc("/v1/logs", handleRequest)
 	mux.HandleFunc("/v1/metrics", handleRequest)
 
-	// --- Graceful Shutdown ---
-	// Run server in a goroutine so that it doesn't block.
 	go func() {
 		log.Println("Starting proxy server on :4318...")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -179,14 +176,11 @@ func main() {
 		}
 	}()
 
-	// Listen for interrupt signals.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("Shutting down server...")
 
-	// The context is used to inform the server it has 30 seconds to finish
-	// the requests it is currently handling.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -197,7 +191,6 @@ func main() {
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-	// Ensure the request body is always closed to prevent resource leaks.
 	defer r.Body.Close()
 
 	requestSize := r.ContentLength
@@ -227,7 +220,6 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("CRITICAL: Redis script failed: %v. Executing fail-over strategy.", err)
 		if failOpenSampleRate > 0 && rand.Float64() < failOpenSampleRate {
 			log.Printf("Failing open with sample rate %f. Forwarding request.", failOpenSampleRate)
-			// We don't have the upstream status, so we accept the request.
 			if _, err := forwardRequest(r, bodyReader, requestSize); err != nil {
 				http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 			} else {
