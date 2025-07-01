@@ -288,6 +288,9 @@ func forwardRequest(originalReq *http.Request, body io.Reader, requestSize int64
 	}
 	defer resp.Body.Close()
 
+	// DEBUG: Log the status code of every response from the upstream.
+	log.Printf("INFO: Upstream response for %s: Status %d", destURL.Path, resp.StatusCode)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
 		log.Printf("WARN: Upstream responded with status %d for %s: %s", resp.StatusCode, destURL.Path, string(respBody))
