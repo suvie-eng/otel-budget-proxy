@@ -105,23 +105,28 @@ func init() {
 		log.Println("Redis failure mode: fail closed.")
 	}
 
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
+	// --- Redis Client Initialization ---
+	redisURLStr := os.Getenv("REDIS_URL")
+	if redisURLStr == "" {
 		log.Fatal("FATAL: REDIS_URL environment variable is not set.")
 	}
 
-	// --- Redis Client Initialization ---
-	redisURL, err := url.Parse(redisURL)
+	// Parse the Redis URL. Use a different variable name to avoid conflict.
+	parsedRedisURL, err := url.Parse(redisURLStr)
 	if err != nil {
 		log.Fatalf("FATAL: Invalid REDIS_URL: %v", err)
 	}
+
 	var tlsConfig *tls.Config
-	if redisURL.Scheme == "rediss" {
+	if parsedRedisURL.Scheme == "rediss" {
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
-	password, _ := redisURL.User.Password()
+	password, _ := parsedRedisURL.User.Password()
 	rdb = redis.NewClient(&redis.Options{
-		Addr: redisURL.Host, Username: redisURL.User.Username(), Password: password, TLSConfig: tlsConfig,
+		Addr:      parsedRedisURL.Host,
+		Username:  parsedRedisURL.User.Username(),
+		Password:  password,
+		TLSConfig: tlsConfig,
 	})
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -222,6 +227,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("CRITICAL: Redis script failed: %v. Executing fail-over strategy.", err)
 		if failOpenSampleRate > 0 && rand.Float64() < failOpenSampleRate {
 			log.Printf("Failing open with sample rate %f. Forwarding request.", failOpenSampleRate)
+			// We don't have the upstream status, so we accept the request.
 			if _, err := forwardRequest(r, bodyReader, requestSize); err != nil {
 				http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 			} else {
