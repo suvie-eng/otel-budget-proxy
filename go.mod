@@ -1,8 +1,6 @@
 module github.com/suvie-eng/otel-budget-proxy
 
-go 1.23.0
-
-toolchain go1.23.10
+go 1.18
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5

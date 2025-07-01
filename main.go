@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -21,12 +23,29 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// HourlySchedule represents a single hour's budget configuration
+type HourlySchedule struct {
+	Hour             int     `json:"hour"`
+	MegabytesPerHour int64   `json:"megabytes_per_hour"`
+	TotalPercent     float64 `json:"total_percent"`
+}
+
+// ScheduleConfig represents the full schedule configuration
+type ScheduleConfig struct {
+	Schedule []HourlySchedule `json:"schedule"`
+}
+
 var (
 	upstreamURL        *url.URL
 	authToken          string
 	budgetBytes        int64
 	budgetWindowType   string
 	failOpenSampleRate float64
+
+	// Schedule-specific variables
+	scheduleConfig     *ScheduleConfig
+	dailyTotalBytes    int64
+	hourlyBudgetBytes  [24]int64 // Pre-calculated budget for each hour
 
 	rdb               *redis.Client
 	client            *http.Client
@@ -87,8 +106,18 @@ func init() {
 	budgetBytes = budgetMegabytes * 1000 * 1000
 
 	budgetWindowType = strings.ToLower(os.Getenv("BUDGET_WINDOW_TYPE"))
-	if budgetWindowType != "hourly" && budgetWindowType != "daily" {
+	if budgetWindowType != "hourly" && budgetWindowType != "daily" && budgetWindowType != "schedule" {
 		budgetWindowType = "hourly"
+	}
+
+	// --- Schedule Configuration ---
+	if budgetWindowType == "schedule" {
+		if err := loadScheduleConfig(); err != nil {
+			log.Fatalf("FATAL: Failed to load schedule configuration: %v", err)
+		}
+		if err := validateAndCalculateSchedule(); err != nil {
+			log.Fatalf("FATAL: Schedule validation failed: %v", err)
+		}
 	}
 
 	// --- Failure Strategy Configuration ---
@@ -147,7 +176,91 @@ func init() {
 		},
 	}
 
-	log.Printf("Proxy configured. Budget: %d bytes per %s. Upstream: %s", budgetBytes, budgetWindowType, upstreamURL.Host)
+	if budgetWindowType == "schedule" {
+		log.Printf("Proxy configured with schedule budget. Upstream: %s", upstreamURL.Host)
+	} else {
+		log.Printf("Proxy configured. Budget: %d bytes per %s. Upstream: %s", budgetBytes, budgetWindowType, upstreamURL.Host)
+	}
+}
+
+// loadScheduleConfig loads the schedule configuration from schedule.json
+func loadScheduleConfig() error {
+	data, err := os.ReadFile("schedule.json")
+	if err != nil {
+		return err
+	}
+
+	scheduleConfig = &ScheduleConfig{}
+	if err := json.Unmarshal(data, scheduleConfig); err != nil {
+		return err
+	}
+
+	if len(scheduleConfig.Schedule) != 24 {
+		return fmt.Errorf("schedule must contain exactly 24 hours, got %d", len(scheduleConfig.Schedule))
+	}
+
+	// Verify all hours 0-23 are present
+	hourMap := make(map[int]bool)
+	for _, h := range scheduleConfig.Schedule {
+		if h.Hour < 0 || h.Hour > 23 {
+			return fmt.Errorf("invalid hour %d, must be 0-23", h.Hour)
+		}
+		if hourMap[h.Hour] {
+			return fmt.Errorf("duplicate hour %d in schedule", h.Hour)
+		}
+		hourMap[h.Hour] = true
+	}
+
+	log.Println("Successfully loaded schedule configuration.")
+	return nil
+}
+
+// validateAndCalculateSchedule validates the schedule and pre-calculates hourly budgets
+func validateAndCalculateSchedule() error {
+	// Calculate total percentage
+	totalPercent := 0.0
+	for _, h := range scheduleConfig.Schedule {
+		totalPercent += h.TotalPercent
+	}
+
+	// Validate percentage range
+	if totalPercent < 99.9 || totalPercent > 100.0 {
+		return fmt.Errorf("total percentage %.2f%% is outside valid range (99.9%% - 100.0%%)", totalPercent)
+	}
+
+	log.Printf("Schedule validation passed. Total percentage: %.2f%%", totalPercent)
+
+	// Check for MAX_TOTAL_BYTES_PER_DAY environment variable
+	dailyBytesStr := os.Getenv("MAX_TOTAL_BYTES_PER_DAY")
+	if dailyBytesStr != "" {
+		dailyMegabytes, err := strconv.ParseInt(dailyBytesStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid MAX_TOTAL_BYTES_PER_DAY: %v", err)
+		}
+		dailyTotalBytes = dailyMegabytes * 1000 * 1000
+
+		// Calculate hourly budgets based on percentages
+		for _, h := range scheduleConfig.Schedule {
+			percentage := h.TotalPercent / 100.0
+			hourlyBudgetBytes[h.Hour] = int64(math.Round(float64(dailyTotalBytes) * percentage))
+		}
+
+		log.Printf("Using MAX_TOTAL_BYTES_PER_DAY: %d MB, budgets calculated from percentages", dailyMegabytes)
+	} else {
+		// Use the static megabytes_per_hour values
+		for _, h := range scheduleConfig.Schedule {
+			hourlyBudgetBytes[h.Hour] = h.MegabytesPerHour * 1000 * 1000
+		}
+
+		log.Println("Using static megabytes_per_hour values from schedule")
+	}
+
+	// Log the calculated hourly budgets
+	for i := 0; i < 24; i++ {
+		log.Printf("Hour %02d: %d MB budget", i, hourlyBudgetBytes[i]/(1000*1000))
+	}
+
+	return nil
 }
 
 func main() {
@@ -213,8 +326,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	budgetKey := "otel:budget:" + getWindowKey()
 	windowTTLMillis := getWindowTTL().Milliseconds()
+	currentBudget := getCurrentBudget()
 
-	res, err := checkBudgetScript.Run(ctx, rdb, []string{budgetKey}, requestSize, budgetBytes, windowTTLMillis).Result()
+	res, err := checkBudgetScript.Run(ctx, rdb, []string{budgetKey}, requestSize, currentBudget, windowTTLMillis).Result()
 	if err != nil {
 		log.Printf("CRITICAL: Redis script failed: %v. Executing fail-over strategy.", err)
 		if failOpenSampleRate > 0 && rand.Float64() < failOpenSampleRate {
@@ -245,11 +359,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// getCurrentBudget returns the budget for the current window
+func getCurrentBudget() int64 {
+	if budgetWindowType == "schedule" {
+		hour := time.Now().UTC().Hour()
+		return hourlyBudgetBytes[hour]
+	}
+	return budgetBytes
+}
+
 func getWindowKey() string {
 	now := time.Now().UTC()
 	if budgetWindowType == "daily" {
 		return now.Format("2006-01-02")
 	}
+	// For both "hourly" and "schedule" types, use hourly keys
 	return now.Format("2006-01-02T15")
 }
 
@@ -257,6 +381,7 @@ func getWindowTTL() time.Duration {
 	if budgetWindowType == "daily" {
 		return 24*time.Hour + 5*time.Minute
 	}
+	// For both "hourly" and "schedule" types, use hourly TTL
 	return time.Hour + 5*time.Minute
 }
 
