@@ -306,6 +306,16 @@ func emitDropMetric(originalReq *http.Request, bytesDropped int) {
 		log.Printf("ERROR: Failed to marshal drop metric: %v", err)
 		return
 	}
-	forwardRequest(originalReq, bytes.NewReader(data), int64(len(data)))
+
+	// Create a new, clean request object to pass to forwardRequest.
+	// This ensures we don't inherit the original request's headers (like Content-Encoding).
+	metricReq, err := http.NewRequestWithContext(originalReq.Context(), "POST", "/v1/metrics", nil)
+	if err != nil {
+		log.Printf("ERROR: Could not create metric request: %v", err)
+		return
+	}
+	metricReq.Header.Set("Content-Type", "application/json")
+
+	forwardRequest(metricReq, bytes.NewReader(data), int64(len(data)))
 }
 
