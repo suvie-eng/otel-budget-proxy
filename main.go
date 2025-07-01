@@ -100,7 +100,7 @@ func init() {
 			log.Printf("WARN: Invalid FAIL_OPEN_SAMPLE_RATE '%s'. Must be float between 0.0 and 1.0. Defaulting to 0.0 (fail closed).", failSampleRateStr)
 			failOpenSampleRate = 0.0
 		} else {
-			failOpenSampleRate = rate
+			rate, err = strconv.ParseFloat(failSampleRateStr, 64)
 			log.Printf("Redis failure mode: fail open with sample rate %f", failOpenSampleRate)
 		}
 	} else {
@@ -275,7 +275,14 @@ func forwardRequest(originalReq *http.Request, body io.Reader, requestSize int64
 
 	req.Header = originalReq.Header.Clone()
 	req.Header.Del("Authorization")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", authToken))
+	
+	// MODIFICATION: Send the raw token without the "Bearer" prefix to test the user's hypothesis.
+	authHeaderValue := strings.TrimSpace(authToken)
+	req.Header.Set("Authorization", authHeaderValue)
+
+	// DEBUG: Log the exact Authorization header being sent.
+	log.Printf("DEBUG: Forwarding with Authorization Header: '%s'", authHeaderValue)
+
 
 	if requestSize > 0 {
 		req.ContentLength = requestSize
