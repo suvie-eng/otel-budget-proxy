@@ -1,0 +1,313 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"math/rand"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	upstreamURL        *url.URL
+	authToken          string
+	budgetBytes        int64
+	budgetWindowType   string
+	failOpenSampleRate float64
+
+	rdb               *redis.Client
+	client            *http.Client
+	checkBudgetScript *redis.Script
+	ctx               = context.Background()
+)
+
+// This Lua script is the core of the atomic budget check. It has been hardened
+// to handle rare TTL race conditions after a Redis failover.
+const checkBudgetLua = `
+local current_usage = redis.call("INCRBY", KEYS[1], ARGV[1])
+local budget = tonumber(ARGV[2])
+
+if current_usage > budget then
+  -- Budget exceeded, so refund the increment and return 0 (deny).
+  redis.call("DECRBY", KEYS[1], ARGV[1])
+  return 0
+end
+
+-- If the key's TTL is not set (e.g., after a failover), set it.
+if redis.call("PTTL", KEYS[1]) < 0 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[3])
+end
+
+return 1
+`
+
+func init() {
+	// Seed the random number generator for non-deterministic sampling.
+	rand.Seed(time.Now().UnixNano())
+
+	// --- Configuration Loading ---
+	ingestURLStr := os.Getenv("OTEL_INGEST_URL")
+	if ingestURLStr == "" {
+		log.Fatal("FATAL: OTEL_INGEST_URL environment variable is not set.")
+	}
+	var err error
+	upstreamURL, err = url.Parse(ingestURLStr)
+	if err != nil {
+		log.Fatalf("FATAL: Invalid OTEL_INGEST_URL: %v", err)
+	}
+
+	authToken = os.Getenv("OTEL_INGEST_TOKEN")
+	if authToken == "" {
+		log.Fatal("FATAL: OTEL_INGEST_TOKEN environment variable is not set.")
+	}
+
+	budgetBytesStr := os.Getenv("MAX_BYTES_PER_WINDOW")
+	if budgetBytesStr == "" {
+		log.Fatal("FATAL: MAX_BYTES_PER_WINDOW environment variable is not set.")
+	}
+	budgetBytes, err = strconv.ParseInt(budgetBytesStr, 10, 64)
+	if err != nil {
+		log.Fatalf("FATAL: Invalid MAX_BYTES_PER_WINDOW: %v", err)
+	}
+
+	budgetWindowType = strings.ToLower(os.Getenv("BUDGET_WINDOW_TYPE"))
+	if budgetWindowType != "hourly" && budgetWindowType != "daily" {
+		budgetWindowType = "hourly"
+	}
+
+	// --- Failure Strategy Configuration ---
+	failSampleRateStr := os.Getenv("FAIL_OPEN_SAMPLE_RATE")
+	if failSampleRateStr != "" {
+		rate, err := strconv.ParseFloat(failSampleRateStr, 64)
+		if err != nil || rate < 0 || rate > 1 {
+			log.Printf("WARN: Invalid FAIL_OPEN_SAMPLE_RATE '%s'. Must be float between 0.0 and 1.0. Defaulting to 0.0 (fail closed).", failSampleRateStr)
+			failOpenSampleRate = 0.0
+		} else {
+			failOpenSampleRate = rate
+			log.Printf("Redis failure mode: fail open with sample rate %f", failOpenSampleRate)
+		}
+	} else {
+		failOpenSampleRate = 0.0 // Default to fail closed
+		log.Println("Redis failure mode: fail closed.")
+	}
+
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		log.Fatal("FATAL: REDIS_ADDR environment variable is not set.")
+	}
+
+	// --- Redis Client Initialization ---
+	redisURL, err := url.Parse(redisAddr)
+	if err != nil {
+		log.Fatalf("FATAL: Invalid REDIS_ADDR: %v", err)
+	}
+	var tlsConfig *tls.Config
+	if redisURL.Scheme == "rediss" {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	password, _ := redisURL.User.Password()
+	rdb = redis.NewClient(&redis.Options{
+		Addr: redisURL.Host, Username: redisURL.User.Username(), Password: password, TLSConfig: tlsConfig,
+	})
+
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		log.Fatalf("FATAL: Could not connect to Redis: %v", err)
+	}
+	log.Println("Successfully connected to Redis.")
+
+	checkBudgetScript = redis.NewScript(checkBudgetLua)
+
+	// --- HTTP Client Initialization ---
+	client = &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns: 100, MaxIdleConnsPerHost: 100, IdleConnTimeout: 90 * time.Second,
+		},
+	}
+
+	log.Printf("Proxy configured. Budget: %d bytes per %s. Upstream: %s", budgetBytes, budgetWindowType, upstreamURL.Host)
+}
+
+func main() {
+	// Use a new ServeMux to avoid registering handlers on the DefaultServeMux.
+	mux := http.NewServeMux()
+	server := &http.Server{
+		Addr:              ":4318",
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Add a health check endpoint for orchestrators like Kubernetes.
+	mux.HandleFunc("/_healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	// Add a metrics endpoint for Prometheus.
+	mux.Handle("/metrics", promhttp.Handler())
+
+	mux.HandleFunc("/v1/traces", handleRequest)
+	mux.HandleFunc("/v1/logs", handleRequest)
+	mux.HandleFunc("/v1/metrics", handleRequest)
+
+	// --- Graceful Shutdown ---
+	// Run server in a goroutine so that it doesn't block.
+	go func() {
+		log.Println("Starting proxy server on :4318...")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Could not listen on %s: %v\n", server.Addr, err)
+		}
+	}()
+
+	// Listen for interrupt signals.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	log.Println("Shutting down server...")
+
+	// The context is used to inform the server it has 30 seconds to finish
+	// the requests it is currently handling.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("Server Shutdown Failed:%+v", err)
+	}
+	log.Println("Server exited properly")
+}
+
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	// Ensure the request body is always closed to prevent resource leaks.
+	defer r.Body.Close()
+
+	requestSize := r.ContentLength
+	var bodyReader io.Reader = r.Body
+
+	if requestSize <= 0 {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("ERROR: Failed to read request body: %v", err)
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		requestSize = int64(len(bodyBytes))
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	if requestSize == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	budgetKey := "otel:budget:" + getWindowKey()
+	windowTTLMillis := getWindowTTL().Milliseconds()
+
+	res, err := checkBudgetScript.Run(ctx, rdb, []string{budgetKey}, requestSize, budgetBytes, windowTTLMillis).Result()
+	if err != nil {
+		log.Printf("CRITICAL: Redis script failed: %v. Executing fail-over strategy.", err)
+		if failOpenSampleRate > 0 && rand.Float64() < failOpenSampleRate {
+			log.Printf("Failing open with sample rate %f. Forwarding request.", failOpenSampleRate)
+			if _, err := forwardRequest(r, bodyReader, requestSize); err != nil {
+				http.Error(w, "Failed to forward request", http.StatusInternalServerError)
+			} else {
+				w.WriteHeader(http.StatusAccepted)
+			}
+		} else {
+			log.Println("Failing closed. Dropping request.")
+			http.Error(w, "Rate limit backend unavailable; request dropped.", http.StatusServiceUnavailable)
+		}
+		return
+	}
+
+	if isAllowed, ok := res.(int64); !ok || isAllowed == 0 {
+		log.Printf("WARN: Budget exceeded. Dropping %d bytes.", requestSize)
+		emitDropMetric(r, int(requestSize))
+		http.Error(w, "Data budget exceeded", http.StatusTooManyRequests)
+		return
+	}
+
+	if upstreamStatus, err := forwardRequest(r, bodyReader, requestSize); err != nil {
+		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
+	} else {
+		w.WriteHeader(upstreamStatus)
+	}
+}
+
+func getWindowKey() string {
+	now := time.Now().UTC()
+	if budgetWindowType == "daily" {
+		return now.Format("2006-01-02")
+	}
+	return now.Format("2006-01-02T15")
+}
+
+func getWindowTTL() time.Duration {
+	if budgetWindowType == "daily" {
+		return 24*time.Hour + 5*time.Minute
+	}
+	return time.Hour + 5*time.Minute
+}
+
+func forwardRequest(originalReq *http.Request, body io.Reader, requestSize int64) (int, error) {
+	destURL := upstreamURL.ResolveReference(originalReq.URL)
+
+	req, err := http.NewRequestWithContext(originalReq.Context(), originalReq.Method, destURL.String(), body)
+	if err != nil {
+		log.Printf("ERROR: Failed to create upstream request: %v", err)
+		return 0, err
+	}
+
+	req.Header = originalReq.Header.Clone()
+	req.Header.Del("Authorization")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", authToken))
+
+	if requestSize > 0 {
+		req.ContentLength = requestSize
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("ERROR: Failed to forward request to upstream: %v", err)
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("WARN: Upstream responded with status %d for %s: %s", resp.StatusCode, destURL.Path, string(respBody))
+	}
+
+	return resp.StatusCode, nil
+}
+
+func emitDropMetric(originalReq *http.Request, bytesDropped int) {
+	metric := map[string]interface{}{
+		"name": "otel_proxy.ingest_budget.dropped_bytes", "unit": "By", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "value": bytesDropped,
+		"attributes": map[string]string{"reason": "budget_exceeded"},
+	}
+	payload := map[string]interface{}{
+		"resourceMetrics": []map[string]interface{}{{"scopeMetrics": []map[string]interface{}{{"metrics": []map[string]interface{}{metric}}}}},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal drop metric: %v", err)
+		return
+	}
+	forwardRequest(originalReq, bytes.NewReader(data), int64(len(data)))
+}
+
