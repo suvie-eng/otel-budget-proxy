@@ -193,6 +193,9 @@ func main() {
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
+	// DEBUG: Log every incoming request to see if traffic is arriving.
+	log.Printf("INFO: Received request: %s %s (ContentLength: %d)", r.Method, r.URL.Path, r.ContentLength)
+
 	requestSize := r.ContentLength
 	var bodyReader io.Reader = r.Body
 
@@ -307,8 +310,6 @@ func emitDropMetric(originalReq *http.Request, bytesDropped int) {
 		return
 	}
 
-	// Create a new, clean request object to pass to forwardRequest.
-	// This ensures we don't inherit the original request's headers (like Content-Encoding).
 	metricReq, err := http.NewRequestWithContext(originalReq.Context(), "POST", "/v1/metrics", nil)
 	if err != nil {
 		log.Printf("ERROR: Could not create metric request: %v", err)
