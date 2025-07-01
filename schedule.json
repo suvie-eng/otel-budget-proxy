@@ -1,0 +1,124 @@
+{
+  "schedule": [
+    {
+      "hour": 0,
+      "megabytes_per_hour": 50,
+      "total_percent": 2.1
+    },
+    {
+      "hour": 1,
+      "megabytes_per_hour": 30,
+      "total_percent": 1.2
+    },
+    {
+      "hour": 2,
+      "megabytes_per_hour": 25,
+      "total_percent": 1.0
+    },
+    {
+      "hour": 3,
+      "megabytes_per_hour": 20,
+      "total_percent": 0.8
+    },
+    {
+      "hour": 4,
+      "megabytes_per_hour": 20,
+      "total_percent": 0.8
+    },
+    {
+      "hour": 5,
+      "megabytes_per_hour": 25,
+      "total_percent": 1.0
+    },
+    {
+      "hour": 6,
+      "megabytes_per_hour": 40,
+      "total_percent": 1.7
+    },
+    {
+      "hour": 7,
+      "megabytes_per_hour": 60,
+      "total_percent": 2.5
+    },
+    {
+      "hour": 8,
+      "megabytes_per_hour": 80,
+      "total_percent": 4.3
+    },
+    {
+      "hour": 9,
+      "megabytes_per_hour": 120,
+      "total_percent": 6.0
+    },
+    {
+      "hour": 10,
+      "megabytes_per_hour": 140,
+      "total_percent": 6.1
+    },
+    {
+      "hour": 11,
+      "megabytes_per_hour": 150,
+      "total_percent": 7.2
+    },
+    {
+      "hour": 12,
+      "megabytes_per_hour": 130,
+      "total_percent": 7.4
+    },
+    {
+      "hour": 13,
+      "megabytes_per_hour": 160,
+      "total_percent": 7.6
+    },
+    {
+      "hour": 14,
+      "megabytes_per_hour": 170,
+      "total_percent": 7.6
+    },
+    {
+      "hour": 15,
+      "megabytes_per_hour": 180,
+      "total_percent": 7.5
+    },
+    {
+      "hour": 16,
+      "megabytes_per_hour": 160,
+      "total_percent": 7.1
+    },
+    {
+      "hour": 17,
+      "megabytes_per_hour": 140,
+      "total_percent": 5.8
+    },
+    {
+      "hour": 18,
+      "megabytes_per_hour": 110,
+      "total_percent": 5.6
+    },
+    {
+      "hour": 19,
+      "megabytes_per_hour": 90,
+      "total_percent": 4.7
+    },
+    {
+      "hour": 20,
+      "megabytes_per_hour": 80,
+      "total_percent": 4.3
+    },
+    {
+      "hour": 21,
+      "megabytes_per_hour": 70,
+      "total_percent": 2.9
+    },
+    {
+      "hour": 22,
+      "megabytes_per_hour": 60,
+      "total_percent": 2.5
+    },
+    {
+      "hour": 23,
+      "megabytes_per_hour": 55,
+      "total_percent": 2.3
+    }
+  ]
+}
