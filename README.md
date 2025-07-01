@@ -26,7 +26,7 @@ The proxy is configured entirely through environment variables.
 
 | Variable                  | Description                                                                                             | Example                                             |
 | ------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `OTEL_INGEST_URL`         | Full URL of the upstream OTLP endpoint.                                                                 | `https://in-us.hyperdx.io/v1/traces`                |
+| `OTEL_INGEST_URL`         | The base URL of the upstream OTLP endpoint. The proxy will append `/v1/traces`, `/v1/logs`, etc. automatically. | `https://in-us.hyperdx.io`                          |
 | `OTEL_INGEST_TOKEN`       | The secret authorization token for the upstream endpoint.                                               | `abc-123-def-456`                                   |
 | `REDIS_ADDR`              | Full Redis URL for budget tracking. Use `rediss://` for TLS.                                            | `redis://localhost:6379` or `rediss://:pass@host:port` |
 | `BUDGET_WINDOW_TYPE`      | The window for the budget. Can be `hourly` or `daily`.                                                  | `daily`                                             |
@@ -49,7 +49,7 @@ The proxy exposes two standard monitoring endpoints:
 # It will fail closed if it cannot reach Redis.
 
 docker run -p 4318:4318 \
-  -e OTEL_INGEST_URL="[https://in-us.hyperdx.io/v1/traces](https://in-us.hyperdx.io/v1/traces)" \
+  -e OTEL_INGEST_URL="[https://in-us.hyperdx.io](https://in-us.hyperdx.io)" \
   -e OTEL_INGEST_TOKEN="your-secret-token" \
   -e REDIS_ADDR="redis://your-redis-host:6379" \
   -e BUDGET_WINDOW_TYPE="hourly" \
