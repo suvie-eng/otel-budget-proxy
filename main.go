@@ -105,15 +105,15 @@ func init() {
 		log.Println("Redis failure mode: fail closed.")
 	}
 
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		log.Fatal("FATAL: REDIS_ADDR environment variable is not set.")
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		log.Fatal("FATAL: REDIS_URL environment variable is not set.")
 	}
 
 	// --- Redis Client Initialization ---
-	redisURL, err := url.Parse(redisAddr)
+	redisURL, err := url.Parse(redisURL)
 	if err != nil {
-		log.Fatalf("FATAL: Invalid REDIS_ADDR: %v", err)
+		log.Fatalf("FATAL: Invalid REDIS_URL: %v", err)
 	}
 	var tlsConfig *tls.Config
 	if redisURL.Scheme == "rediss" {

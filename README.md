@@ -28,7 +28,7 @@ The proxy is configured entirely through environment variables.
 | ------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `OTEL_INGEST_URL`         | The base URL of the upstream OTLP endpoint. The proxy will append `/v1/traces`, `/v1/logs`, etc. automatically. | `https://in-us.hyperdx.io`                          |
 | `OTEL_INGEST_TOKEN`       | The secret authorization token for the upstream endpoint.                                               | `abc-123-def-456`                                   |
-| `REDIS_ADDR`              | Full Redis URL for budget tracking. Use `rediss://` for TLS.                                            | `redis://localhost:6379` or `rediss://:pass@host:port` |
+| `REDIS_URL`              | Full Redis URL for budget tracking. Use `rediss://` for TLS.                                            | `redis://localhost:6379` or `rediss://:pass@host:port` |
 | `BUDGET_WINDOW_TYPE`      | The window for the budget. Can be `hourly` or `daily`.                                                  | `daily`                                             |
 | `MAX_BYTES_PER_WINDOW`    | Max allowed bytes per window in plain integers.                                                         | `1073741824` (for 1 GiB)                            |
 | `FAIL_OPEN_SAMPLE_RATE`   | **(Optional)** A float between `0.0` and `1.0`. If set, the proxy will forward this percentage of traffic if Redis is down. **Defaults to `0.0` (fail-closed).** | `0.05` (for 5% sampling)                            |
@@ -51,7 +51,7 @@ The proxy exposes two standard monitoring endpoints:
 docker run -p 4318:4318 \
   -e OTEL_INGEST_URL="[https://in-us.hyperdx.io](https://in-us.hyperdx.io)" \
   -e OTEL_INGEST_TOKEN="your-secret-token" \
-  -e REDIS_ADDR="redis://your-redis-host:6379" \
+  -e REDIS_URL="redis://your-redis-host:6379" \
   -e BUDGET_WINDOW_TYPE="hourly" \
   -e MAX_BYTES_PER_WINDOW="100000000" \
   suvie-eng/otel-budget-proxy
