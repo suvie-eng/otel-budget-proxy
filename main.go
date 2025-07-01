@@ -99,7 +99,7 @@ func init() {
 			log.Printf("WARN: Invalid FAIL_OPEN_SAMPLE_RATE '%s'. Must be float between 0.0 and 1.0. Defaulting to 0.0 (fail closed).", failSampleRateStr)
 			failOpenSampleRate = 0.0
 		} else {
-			rate, err = strconv.ParseFloat(failSampleRateStr, 64)
+			failOpenSampleRate = rate
 			log.Printf("Redis failure mode: fail open with sample rate %f", failOpenSampleRate)
 		}
 	} else {
@@ -192,9 +192,6 @@ func main() {
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
-	// DEBUG: Log every incoming request to see if traffic is arriving.
-	log.Printf("INFO: Received request: %s %s (ContentLength: %d)", r.Method, r.URL.Path, r.ContentLength)
-
 	requestSize := r.ContentLength
 	var bodyReader io.Reader = r.Body
 
@@ -274,14 +271,7 @@ func forwardRequest(originalReq *http.Request, body io.Reader, requestSize int64
 
 	req.Header = originalReq.Header.Clone()
 	req.Header.Del("Authorization")
-	
-	// MODIFICATION: Send the raw token without the "Bearer" prefix to test the user's hypothesis.
-	authHeaderValue := strings.TrimSpace(authToken)
-	req.Header.Set("Authorization", authHeaderValue)
-
-	// DEBUG: Log the exact Authorization header being sent.
-	log.Printf("DEBUG: Forwarding with Authorization Header: '%s'", authHeaderValue)
-
+	req.Header.Set("Authorization", strings.TrimSpace(authToken))
 
 	if requestSize > 0 {
 		req.ContentLength = requestSize
@@ -293,9 +283,6 @@ func forwardRequest(originalReq *http.Request, body io.Reader, requestSize int64
 		return 0, err
 	}
 	defer resp.Body.Close()
-
-	// DEBUG: Log the status code of every response from the upstream.
-	log.Printf("INFO: Upstream response for %s: Status %d", destURL.Path, resp.StatusCode)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
