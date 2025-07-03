@@ -4,7 +4,6 @@ import (
     "bytes"
     "context"
     "crypto/tls"
-    "compress/gzip"
     "encoding/json"
     "io"
     "log"
