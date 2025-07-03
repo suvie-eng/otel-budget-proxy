@@ -4,7 +4,6 @@ import (
     "bytes"
     "context"
     "crypto/tls"
-    "encoding/json"
     "io"
     "log"
     "math/rand"
@@ -235,7 +234,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
     usage, _ := rdb.Get(ctx, key).Int64()
     debugf("post-check key=%s usage=%d size=%d budget=%d allowed=%v", key, usage, requestSize, budgetBytes, allowed == 1)
     if allowed == 0 {
-        emitDropMetric(r, int(requestSize))
+        // emitDropMetric(r, int(requestSize))
         http.Error(w, "Budget exceeded", http.StatusTooManyRequests)
         return
     }
@@ -306,28 +305,28 @@ func forwardRequest(orig *http.Request, body io.Reader, size int64) (int, error)
 // metrics ---------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 
-func emitDropMetric(orig *http.Request, dropped int) {
-    metric := map[string]interface{}{
-        "name":  "otel_proxy.ingest_budget.dropped_bytes",
-        "unit":  "By",
-        "value": dropped,
-        "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-        "attributes": map[string]string{"reason": "budget_exceeded"},
-    }
-    payload := map[string]interface{}{
-        "resourceMetrics": []interface{}{map[string]interface{}{
-            "scopeMetrics": []interface{}{map[string]interface{}{
-                "metrics": []interface{}{metric},
-            }},
-        }},
-    }
-    data, _ := json.Marshal(payload)
-
-    // forward metric asynchronously (fire and forget)
-    go func() {
-        req, _ := http.NewRequestWithContext(orig.Context(), "POST", "/v1/metrics", bytes.NewReader(data))
-        req.Header.Set("Content-Type", "application/json")
-        forwardRequest(orig, req.Body, int64(len(data)))
-    }()
-}
-
+// func emitDropMetric(orig *http.Request, dropped int) {
+//     metric := map[string]interface{}{
+//         "name":  "otel_proxy.ingest_budget.dropped_bytes",
+//         "unit":  "By",
+//         "value": dropped,
+//         "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+//         "attributes": map[string]string{"reason": "budget_exceeded"},
+//     }
+//     payload := map[string]interface{}{
+//         "resourceMetrics": []interface{}{map[string]interface{}{
+//             "scopeMetrics": []interface{}{map[string]interface{}{
+//                 "metrics": []interface{}{metric},
+//             }},
+//         }},
+//     }
+//     data, _ := json.Marshal(payload)
+//
+//     // forward metric asynchronously (fire and forget)
+//     go func() {
+//         req, _ := http.NewRequestWithContext(orig.Context(), "POST", "/v1/metrics", bytes.NewReader(data))
+//         req.Header.Set("Content-Type", "application/json")
+//         forwardRequest(orig, req.Body, int64(len(data)))
+//     }()
+// }
+//
