@@ -259,16 +259,19 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	rawSize := sizeForBudgeting
+
 	const (
-		// tunables – move to top and/or load from ENV if you like
-		rMax = 2.6          // asymptotic HX-to-proxy gap on very large batches
-		s    = 60_000.0     // raw-byte size where the gap is ~63 % of rMax
+		rMax = 2.6
+		s    = 60_000.0
 	)
-	factor := 1 + (rMax-1)*(1-math.Exp(-float64(sizeForBudgeting)/s))
-	sizeForBudgeting = int64(float64(sizeForBudgeting) * factor)
+	factor   := 1 + (rMax-1)*(1-math.Exp(-float64(rawSize)/s))
+	adjSize  := int64(float64(rawSize) * factor)   // proper float→int
 
 	debugf("budget bytes: raw=%d  factor=%.3f  adjusted=%d",
-       sizeForBudgeting/int64(factor), factor, sizeForBudgeting)
+       rawSize, factor, adjSize)
+
+	sizeForBudgeting = adjSize   // now use this for the Redis check
 
 	// --- 3. Optimistic budget check (INCRBY inside Lua) ---
 	key := "otel:budget:" + getWindowKey()
