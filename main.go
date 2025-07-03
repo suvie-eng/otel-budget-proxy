@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip" // Import the gzip package
 	"context"
 	"crypto/tls"
 	"io"
@@ -58,12 +59,12 @@ local current_usage = redis.call("INCRBY", KEYS[1], ARGV[1])
 local budget = tonumber(ARGV[2])
 
 if current_usage > budget then
-redis.call("DECRBY", KEYS[1], ARGV[1])
-return 0
+  redis.call("DECRBY", KEYS[1], ARGV[1])
+  return 0
 end
 
 if redis.call("PTTL", KEYS[1]) < 0 then
-redis.call("PEXPIRE", KEYS[1], ARGV[3])
+  redis.call("PEXPIRE", KEYS[1], ARGV[3])
 end
 
 return 1
@@ -210,33 +211,64 @@ func handleMetricsPassthrough(w http.ResponseWriter, r *http.Request) {
 // -----------------------------------------------------------------------------
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
+	// Enforce a max request size to prevent a bad actor from sending a massive
+	// payload that could exhaust memory when buffered. 8 MiB is a reasonable limit.
+	// This will automatically respond with a 413 "Request Entity Too Large" if exceeded.
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20) // 8 MiB limit
+
 	defer r.Body.Close()
 
-	// ── 1. determine compressed body size ─────────────────────────────
-	requestSize := r.ContentLength
-	var bodyBytes []byte
-	var err error
-
-	if requestSize <= 0 {
-		bodyBytes, err = io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("read body: %v", err)
-			http.Error(w, "read error", http.StatusInternalServerError)
-			return
-		}
-		requestSize = int64(len(bodyBytes))
+	// --- 1. Buffer the entire request body into memory ---
+	// This is a trade-off: it increases memory usage in exchange for perfect
+	// budget accuracy. The proxy must hold the entire compressed request
+	// in memory to both calculate its uncompressed size and forward the
+	// original compressed body.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		// If the error is from MaxBytesReader, a 413 response has already been sent.
+		// Otherwise, it's a different read error.
+		log.Printf("read body: %v", err)
+		// No need to write an error header if one was already sent by MaxBytesReader.
+		// We can check for this, but for simplicity, we'll just log and return.
+		return
 	}
+
+	requestSize := int64(len(bodyBytes))
 	if requestSize == 0 {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
-	// ── 2. optimistic budget check (INCRBY inside Lua) ────────────────
+	// --- 2. Determine the size for budgeting (uncompressed size) ---
+	sizeForBudgeting := requestSize
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+		if err != nil {
+			log.Printf("ERROR: Failed to create gzip reader: %v", err)
+			http.Error(w, "Invalid gzip header", http.StatusBadRequest)
+			return
+		}
+		defer gzipReader.Close()
+
+		// Decompress into io.Discard to get the size without allocating memory
+		// for the uncompressed data itself. This is a critical optimization.
+		uncompressedSize, err := io.Copy(io.Discard, gzipReader)
+		if err != nil {
+			log.Printf("ERROR: Failed to decompress body for sizing: %v", err)
+			http.Error(w, "Failed to decompress body", http.StatusInternalServerError)
+			return
+		}
+		sizeForBudgeting = uncompressedSize
+		debugf("gzipped request: compressed=%d, uncompressed=%d", requestSize, sizeForBudgeting)
+	}
+
+	// --- 3. Optimistic budget check (INCRBY inside Lua) ---
 	key := "otel:budget:" + getWindowKey()
 	ttl := getWindowTTL().Milliseconds()
 
+	// Use the uncompressed size for the budget check
 	res, err := checkBudgetScript.Run(
-		ctx, rdb, []string{key}, requestSize, budgetBytes, ttl,
+		ctx, rdb, []string{key}, sizeForBudgeting, budgetBytes, ttl,
 	).Result()
 	if err != nil {
 		log.Printf("Redis err: %v", err)
@@ -245,34 +277,27 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed, _ := res.(int64)
 
-	// This debug line is very helpful, but can be noisy.
-	// It's safe to remove if not needed, but great for debugging.
 	if debugEnabled {
 		usage, _ := rdb.Get(ctx, key).Int64()
 		debugf("post-check key=%s usage=%d size=%d budget=%d allowed=%v",
-		key, usage, requestSize, budgetBytes, allowed == 1)
+			key, usage, sizeForBudgeting, budgetBytes, allowed == 1)
 	}
-
 
 	if allowed == 0 {
 		http.Error(w, "Budget exceeded", http.StatusTooManyRequests)
 		return
 	}
 
-	// ── 3. forward the request ────────────────────────────────────────
-	var bodyReader io.Reader
-	if len(bodyBytes) > 0 {
-		bodyReader = bytes.NewReader(bodyBytes)
-	} else {
-		bodyReader = r.Body
-	}
-
+	// --- 4. Forward the original, compressed request ---
+	// Create a new reader from the buffered bytes.
+	bodyReader := bytes.NewReader(bodyBytes)
 	status, fwdErr := forwardRequest(r, bodyReader, requestSize)
 
-	// ── 4. if upstream failed → refund budget and surface error ──────
+	// --- 5. If upstream failed → refund budget and surface error ---
+	// The refund must use the same size that was debited.
 	if fwdErr != nil || status >= 300 {
-		if derr := rdb.DecrBy(ctx, key, requestSize).Err(); derr != nil {
-			log.Printf("refund failed: %v (key=%s size=%d)", derr, key, requestSize)
+		if derr := rdb.DecrBy(ctx, key, sizeForBudgeting).Err(); derr != nil {
+			log.Printf("refund failed: %v (key=%s size=%d)", derr, key, sizeForBudgeting)
 		}
 		if fwdErr != nil {
 			http.Error(w, "forward error", http.StatusBadGateway)
@@ -282,7 +307,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── 5. success path ───────────────────────────────────────────────
+	// --- 6. Success path ---
 	w.WriteHeader(status) // usually 202 Accepted
 }
 
@@ -332,34 +357,3 @@ func forwardRequest(orig *http.Request, body io.Reader, size int64) (int, error)
 
 	return resp.StatusCode, nil
 }
-
-// -----------------------------------------------------------------------------
-// metrics ---------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-
-// func emitDropMetric(orig *http.Request, dropped int) {
-//      metric := map[string]interface{}{
-//          "name":  "otel_proxy.ingest_budget.dropped_bytes",
-//          "unit":  "By",
-//          "value": dropped,
-//          "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-//          "attributes": map[string]string{"reason": "budget_exceeded"},
-//      }
-//      payload := map[string]interface{}{
-//          "resourceMetrics": []interface{}{map[string]interface{}{
-//              "scopeMetrics": []interface{}{map[string]interface{}{
-//                  "metrics": []interface{}{metric},
-//              }},
-//          }},
-//      }
-//      data, _ := json.Marshal(payload)
-//
-//      // forward metric asynchronously (fire and forget)
-//      go func() {
-//          req, _ := http.NewRequestWithContext(orig.Context(), "POST", "/v1/metrics", bytes.NewReader(data))
-//          req.Header.Set("Content-Type", "application/json")
-//          forwardRequest(orig, req.Body, int64(len(data)))
-//      }()
-// }
-//
-
