@@ -197,63 +197,77 @@ func main() {
 // -----------------------------------------------------------------------------
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-    defer r.Body.Close()
+	defer r.Body.Close()
 
-    requestSize := r.ContentLength
-    var bodyBytes []byte
-    var err error
+	// ── 1. determine compressed body size ─────────────────────────────
+	requestSize := r.ContentLength
+	var bodyBytes []byte
+	var err error
 
-    if requestSize <= 0 {
-        bodyBytes, err = io.ReadAll(r.Body)
-        if err != nil {
-            log.Printf("read body: %v", err)
-            http.Error(w, "read error", http.StatusInternalServerError)
-            return
-        }
-        requestSize = int64(len(bodyBytes))
-    }
+	if requestSize <= 0 {
+		bodyBytes, err = io.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("read body: %v", err)
+			http.Error(w, "read error", http.StatusInternalServerError)
+			return
+		}
+		requestSize = int64(len(bodyBytes))
+	}
+	if requestSize == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 
-    if requestSize == 0 {
-        w.WriteHeader(http.StatusAccepted)
-        return
-    }
+	// ── 2. optimistic budget check (INCRBY inside Lua) ────────────────
+	key := "otel:budget:" + getWindowKey()
+	ttl := getWindowTTL().Milliseconds()
 
-    // budget key + TTL
-    key := "otel:budget:" + getWindowKey()
-    ttl := getWindowTTL().Milliseconds()
+	res, err := checkBudgetScript.Run(
+		ctx, rdb, []string{key}, requestSize, budgetBytes, ttl,
+	).Result()
+	if err != nil {
+		log.Printf("Redis err: %v", err)
+		http.Error(w, "redis unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	allowed, _ := res.(int64)
 
-    // atomic budget check
-    res, err := checkBudgetScript.Run(ctx, rdb, []string{key}, requestSize, budgetBytes, ttl).Result()
-    if err != nil {
-        log.Printf("Redis err: %v", err)
-        http.Error(w, "Redis", http.StatusServiceUnavailable)
-        return
-    }
-    allowed, _ := res.(int64)
-    // fetch updated usage for debug visibility
-    usage, _ := rdb.Get(ctx, key).Int64()
-    debugf("post-check key=%s usage=%d size=%d budget=%d allowed=%v", key, usage, requestSize, budgetBytes, allowed == 1)
-    if allowed == 0 {
-        // emitDropMetric(r, int(requestSize))
-        http.Error(w, "Budget exceeded", http.StatusTooManyRequests)
-        return
-    }
+	usage, _ := rdb.Get(ctx, key).Int64()
+	debugf("post-check key=%s usage=%d size=%d budget=%d allowed=%v",
+		key, usage, requestSize, budgetBytes, allowed == 1)
 
-    // prepare body reader
-    var bodyReader io.Reader
-    if len(bodyBytes) > 0 {
-        bodyReader = bytes.NewReader(bodyBytes)
-    } else {
-        bodyReader = r.Body
-    }
+	if allowed == 0 {
+		http.Error(w, "Budget exceeded", http.StatusTooManyRequests)
+		return
+	}
 
-    status, err := forwardRequest(r, bodyReader, requestSize)
-    if err != nil {
-        http.Error(w, "forward", http.StatusBadGateway)
-        return
-    }
-    w.WriteHeader(status)
+	// ── 3. forward the request ────────────────────────────────────────
+	var bodyReader io.Reader
+	if len(bodyBytes) > 0 {
+		bodyReader = bytes.NewReader(bodyBytes)
+	} else {
+		bodyReader = r.Body
+	}
+
+	status, fwdErr := forwardRequest(r, bodyReader, requestSize)
+
+	// ── 4. if upstream failed → refund budget and surface error ──────
+	if fwdErr != nil || status >= 300 {
+		if derr := rdb.DecrBy(ctx, key, requestSize).Err(); derr != nil {
+			log.Printf("refund failed: %v (key=%s size=%d)", derr, key, requestSize)
+		}
+		if fwdErr != nil {
+			http.Error(w, "forward error", http.StatusBadGateway)
+		} else {
+			w.WriteHeader(status) // bubble 4xx/5xx so caller sees it
+		}
+		return
+	}
+
+	// ── 5. success path ───────────────────────────────────────────────
+	w.WriteHeader(status) // usually 202 Accepted
 }
+
 
 // -----------------------------------------------------------------------------
 // helper fns -------------------------------------------------------------------
