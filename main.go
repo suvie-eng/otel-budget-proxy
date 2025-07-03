@@ -235,7 +235,6 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
     usage, _ := rdb.Get(ctx, key).Int64()
     debugf("post-check key=%s usage=%d size=%d budget=%d allowed=%v", key, usage, requestSize, budgetBytes, allowed == 1)
     if allowed == 0 {
-        debugf("DROP %d bytes (cap %d)", requestSize, budgetBytes)
         emitDropMetric(r, int(requestSize))
         http.Error(w, "Budget exceeded", http.StatusTooManyRequests)
         return
