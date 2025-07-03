@@ -243,24 +243,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// --- 2. Determine the size for budgeting (uncompressed size) ---
 	sizeForBudgeting := requestSize
 	if r.Header.Get("Content-Encoding") == "gzip" {
-		gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+		zr, err := gzip.NewReader(bytes.NewReader(bodyBytes))
 		if err != nil {
-			log.Printf("ERROR: Failed to create gzip reader: %v", err)
-			http.Error(w, "Invalid gzip header", http.StatusBadRequest)
+			log.Printf("invalid gzip: %v", err)
+			http.Error(w, "bad gzip", http.StatusBadRequest)
 			return
 		}
-		defer gzipReader.Close()
-
-		// Decompress into io.Discard to get the size without allocating memory
-		// for the uncompressed data itself. This is a critical optimization.
-		uncompressedSize, err := io.Copy(io.Discard, gzipReader)
-		if err != nil {
-			log.Printf("ERROR: Failed to decompress body for sizing: %v", err)
-			http.Error(w, "Failed to decompress body", http.StatusInternalServerError)
+		defer zr.Close()
+		if n, err := io.Copy(io.Discard, zr); err == nil {
+			sizeForBudgeting = n
+		} else {
+			log.Printf("gun-zip copy: %v", err)
+			http.Error(w, "decompress", http.StatusInternalServerError)
 			return
 		}
-		sizeForBudgeting = uncompressedSize
-		debugf("gzipped request: compressed=%d, uncompressed=%d", requestSize, sizeForBudgeting)
 	}
 
 	const (
@@ -268,8 +264,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		rMax = 2.6          // asymptotic HX-to-proxy gap on very large batches
 		s    = 60_000.0     // raw-byte size where the gap is ~63 % of rMax
 	)
-	adj := 1 + (rMax-1)*(1 - math.Exp(-float64(sizeForBudgeting)/s))
-	sizeForBudgeting = int64(float64(sizeForBudgeting) * adj)
+	factor := 1 + (rMax-1)*(1-math.Exp(-float64(sizeForBudgeting)/s))
+	sizeForBudgeting = int64(float64(sizeForBudgeting) * factor)
+
+	debugf("budget bytes: raw=%d  factor=%.3f  adjusted=%d",
+       sizeForBudgeting/int64(factor), factor, sizeForBudgeting)
 
 	// --- 3. Optimistic budget check (INCRBY inside Lua) ---
 	key := "otel:budget:" + getWindowKey()
