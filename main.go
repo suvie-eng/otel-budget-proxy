@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -261,6 +262,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		sizeForBudgeting = uncompressedSize
 		debugf("gzipped request: compressed=%d, uncompressed=%d", requestSize, sizeForBudgeting)
 	}
+
+	const (
+		// tunables – move to top and/or load from ENV if you like
+		rMax = 2.6          // asymptotic HX-to-proxy gap on very large batches
+		s    = 60_000.0     // raw-byte size where the gap is ~63 % of rMax
+	)
+	adj := 1 + (rMax-1)*(1 - math.Exp(-float64(sizeForBudgeting)/s))
+	sizeForBudgeting = int64(float64(sizeForBudgeting) * adj)
 
 	// --- 3. Optimistic budget check (INCRBY inside Lua) ---
 	key := "otel:budget:" + getWindowKey()
