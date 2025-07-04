@@ -83,7 +83,7 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 	}
 
 	// 3. The final debit is the size of the pure bodies + all duplicated attributes + headers.
-	adj = bodiesOnlySize + dupBytes + headerConst
+	adj = bodiesOnlySize + headerConst
 
 	if raw > 0 {
 		factor = float64(adj) / float64(raw)
