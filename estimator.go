@@ -8,7 +8,7 @@ import (
 // trace IDs, etc.) that wrap each individual span or log record when it's
 // stored in the backend. This is used to more accurately estimate the final,
 // hydrated data size.
-const wrapperOverhead = 70
+const wrapperOverhead = 35
 const headerConst = 140
 
 // EstimateHydratedSize inspects a raw, uncompressed OTLP/JSON payload and
