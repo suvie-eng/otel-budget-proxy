@@ -1,6 +1,6 @@
 # --- Builder Stage ---
-# Use a specific Go version and an Alpine base for smaller size.
-FROM golang:1.21-alpine AS builder
+# Use a specific Go version that matches the go.mod file.
+FROM golang:1.23-alpine AS builder
 
 # Set build arguments for a static, optimized binary.
 ENV CGO_ENABLED=0 GOOS=linux
