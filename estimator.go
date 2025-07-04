@@ -4,39 +4,31 @@ import (
 	"encoding/json"
 )
 
-// wrapperOverhead is a constant estimate for the extra fields (like timestamps,
-// trace IDs, etc.) that wrap each individual span or log record when it's
-// stored in the backend. This is used to more accurately estimate the final,
-// hydrated data size.
-const wrapperOverhead = 35
+// headerConst is a constant estimate for the HTTP request line and headers
+// that wrap the OTLP payload.
 const headerConst = 140
 
-// EstimateHydratedSize inspects a raw, uncompressed OTLP/JSON payload and
-// returns an estimate of its final size after ingestion and hydration in a
-// system like HyperDX.
+// EstimateHydratedSize implements the "start-from-zero" calculation to provide
+// a highly accurate estimate of the final ingested data size.
 //
-// It returns:
-//  * raw:    The size of the original uncompressed JSON payload in bytes.
-//  * factor: The calculated inflation factor (hydrated size / raw size).
-//  * adj:    The final adjusted size in bytes to be debited from the budget.
-//  * rows:   The total number of spans, logs, and metrics found, for debugging.
-//
-// The function walks through the OTLP structure (ResourceSpans -> ScopeSpans)
-// and for each span, log, or metric record, it adds the size of the shared
-// resource and scope attributes, plus a constant overhead. This accounts for
-// data duplication that occurs during ingestion.
+// It works by:
+// 1. Starting with the raw uncompressed payload size.
+// 2. For each (resource, scope) group, it subtracts the size of the shared
+//    attribute blocks to isolate the size of the "pure" log/span bodies.
+// 3. It then calculates the total size of these attributes when duplicated
+//    across every single log/span.
+// 4. The final adjusted size is the sum of the pure bodies, the duplicated
+//    attributes, and a constant for HTTP headers.
 func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int64, rows int) {
 	raw = int64(len(bodyBytes))
 
-	// Define lightweight envelope structures to parse only what's needed for estimation.
-	// This avoids unmarshalling the entire, potentially large, payload into memory.
+	// Define lightweight envelope structures to parse only what's needed.
 	type scopeSpans struct {
 		Scope struct {
 			Attributes json.RawMessage `json:"attributes"`
 		} `json:"scope"`
-		Spans   []json.RawMessage `json:"spans"`
-		Logs    []json.RawMessage `json:"logs"`
-		Metrics []json.RawMessage `json:"metrics"` // Correctly include metrics in parsing.
+		Spans []json.RawMessage `json:"spans"`
+		Logs  []json.RawMessage `json:"logs"`
 	}
 	var env struct {
 		ResourceSpans []struct {
@@ -48,44 +40,57 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 	}
 
 	if err := json.Unmarshal(bodyBytes, &env); err != nil {
-		// If the payload is malformed or not valid JSON, we can't inspect it.
-		// Fall back to a simple billing model: raw size plus a standard header allowance.
+		// If parsing fails, fall back to a simple model: raw size + header constant.
 		factor = 1.0
-		adj = raw + headerConst // 200 is a constant for headers.
+		adj = raw + headerConst
 		return
 	}
 
-	// Use int64 for dupBytes to prevent integer overflow on 32-bit systems
-	// or with extremely large payloads (> 2GiB).
 	var dupBytes int64
+	// Start with the full payload size. We will subtract the shared attribute
+	// blocks to isolate the size of the individual log/span bodies.
+	bodiesOnlySize := raw
+
 	for _, rs := range env.ResourceSpans {
-		resBytes := len(rs.Resource.Attributes)
+		// Get the full size of the attribute blocks as they appear in the JSON.
+		resAttrBlockSize := len(rs.Resource.Attributes)
+		// The actual attributes to be duplicated don't include the outer '{}'.
+		resAttrContentSize := resAttrBlockSize - 2
+		if resAttrContentSize < 0 {
+			resAttrContentSize = 0
+		}
+
 		for _, ss := range rs.ScopeSpans {
-			scopeBytes := len(ss.Scope.Attributes)
+			scopeAttrBlockSize := len(ss.Scope.Attributes)
+			scopeAttrContentSize := scopeAttrBlockSize - 2
+			if scopeAttrContentSize < 0 {
+				scopeAttrContentSize = 0
+			}
 
-			// Calculate the overhead that will be duplicated for each row in this scope.
-			// This must be int64 to prevent overflow during multiplication.
-			rowOverhead := int64(resBytes + scopeBytes + wrapperOverhead)
-
-			// Count all types of signals (spans, logs, and metrics).
-			rowCount := len(ss.Spans) + len(ss.Logs) + len(ss.Metrics)
+			rowCount := len(ss.Spans) + len(ss.Logs)
 			rows += rowCount
 
-			// Add the duplicated overhead for all rows in this scope to the total.
-			// Cast rowCount to int64 for safe multiplication.
-			dupBytes += rowOverhead * int64(rowCount)
+			if rowCount > 0 {
+				// 1. Subtract the one-time cost of the attribute blocks from the total.
+				// This leaves `bodiesOnlySize` holding (mostly) the size of the pure log/span bodies.
+				bodiesOnlySize -= int64(resAttrBlockSize + scopeAttrBlockSize)
+
+				// 2. Calculate the full cost of hydrating EVERY row in this group with attributes.
+				perRowOverhead := int64(resAttrContentSize + scopeAttrContentSize)
+				dupBytes += perRowOverhead * int64(rowCount)
+			}
 		}
 	}
 
-	// The final adjusted size is the original raw size plus the calculated
-	// duplicated bytes and the constant header estimate.
-	adj = raw + dupBytes + headerConst
+	// 3. The final debit is the size of the pure bodies + all duplicated attributes + headers.
+	adj = bodiesOnlySize + dupBytes + headerConst
+
 	if raw > 0 {
 		factor = float64(adj) / float64(raw)
 	} else {
-		// Avoid division by zero if the payload was empty.
 		factor = 1.0
 	}
+
 	return
 }
 
