@@ -8,7 +8,8 @@ import (
 // trace IDs, etc.) that wrap each individual span or log record when it's
 // stored in the backend. This is used to more accurately estimate the final,
 // hydrated data size.
-const wrapperOverhead = 150
+const wrapperOverhead = 70
+const headerConst = 140
 
 // EstimateHydratedSize inspects a raw, uncompressed OTLP/JSON payload and
 // returns an estimate of its final size after ingestion and hydration in a
@@ -50,7 +51,7 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 		// If the payload is malformed or not valid JSON, we can't inspect it.
 		// Fall back to a simple billing model: raw size plus a standard header allowance.
 		factor = 1.0
-		adj = raw + 200 // 200 is a constant for headers.
+		adj = raw + headerConst // 200 is a constant for headers.
 		return
 	}
 
@@ -78,7 +79,7 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 
 	// The final adjusted size is the original raw size plus the calculated
 	// duplicated bytes and the constant header estimate.
-	adj = raw + dupBytes + 200
+	adj = raw + dupBytes + headerConst
 	if raw > 0 {
 		factor = float64(adj) / float64(raw)
 	} else {
