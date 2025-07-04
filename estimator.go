@@ -6,7 +6,7 @@ import (
 
 // headerConst is a constant estimate for the HTTP request line and headers
 // that wrap the OTLP payload.
-const headerConst = 140
+const headerConst = 0
 
 // EstimateHydratedSize implements the "start-from-zero" calculation to provide
 // a highly accurate estimate of the final ingested data size.
@@ -83,7 +83,7 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 	}
 
 	// 3. The final debit is the size of the pure bodies + all duplicated attributes + headers.
-	adj = bodiesOnlySize + headerConst
+	adj = bodiesOnlySize + dupBytes + headerConst
 
 	if raw > 0 {
 		factor = float64(adj) / float64(raw)
