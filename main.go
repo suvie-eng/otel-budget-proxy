@@ -331,23 +331,6 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 // -----------------------------------------------------------------------------
 // helper fns
 // -----------------------------------------------------------------------------
-
-// EstimateHydratedSize is a placeholder for the real estimation logic.
-// A real implementation would parse the JSON to count rows and resource attributes.
-func EstimateHydratedSize(jsonBytes []byte) (raw int64, factor float64, adj int64, rows int) {
-	raw = int64(len(jsonBytes))
-	// This is a stub. A real implementation would involve more complex parsing.
-	// For now, we simulate a simple expansion factor.
-	rows = bytes.Count(jsonBytes, []byte("\n"))
-	if rows == 0 && raw > 0 {
-		rows = 1
-	}
-	// A mock factor that increases with the number of rows.
-	factor = 1.0 + (float64(rows) * 0.25)
-	adj = int64(float64(raw) * factor)
-	return
-}
-
 func getWindowKey() string {
 	now := time.Now().UTC()
 	if budgetWindowType == "daily" {
