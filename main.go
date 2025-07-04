@@ -263,8 +263,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		// Estimate hydrated size from the uncompressed JSON.
 		raw, factor, adj, rows := EstimateHydratedSize(jsonBytes)
 		adjSize = adj // Assign the calculated adjusted size for the budget check.
-		// The missing debug log line is now restored.
-		debugf("rows=%d raw_uncompressed=%d factor=%.2f adjusted_debit=%d", rows, raw, factor, adjSize)
+		// The debug log now includes the total budget for context.
+		debugf("rows=%d raw_uncompressed=%d factor=%.2f adjusted_debit=%d / budget=%d", rows, raw, factor, adjSize, budgetBytes)
 	}
 
 	// --- optimistic budget check ---
