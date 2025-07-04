@@ -38,10 +38,10 @@ func debugf(format string, args ...interface{}) {
 // -----------------------------------------------------------------------------
 
 var (
-	upstreamURL        *url.URL
-	authToken          string
-	budgetBytes        int64
-	budgetWindowType   string
+	upstreamURL      *url.URL
+	authToken        string
+	budgetBytes      int64
+	budgetWindowType string
 	failOpenSampleRate float64
 
 	rdb               *redis.Client
@@ -75,9 +75,9 @@ end
 local current_usage = redis.call("INCRBY", key, debit_amount)
 
 if current_usage > budget then
-  -- If over budget, revert the increment and return 0 (denied).
-  redis.call("DECRBY", key, debit_amount)
-  return 0
+    -- If over budget, revert the increment and return 0 (denied).
+    redis.call("DECRBY", key, debit_amount)
+    return 0
 end
 
 -- Return 1 (allowed).
@@ -273,6 +273,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	redisCheckPassed := false
 
 	res, err := checkBudgetScript.Run(ctx, rdb, []string{key}, adjSize, budgetBytes, ttl).Result()
+
+	// This log line is crucial for debugging and is now always on.
+	// It runs regardless of whether the Redis command succeeded or failed.
+	if err == nil {
+		usage, _ := rdb.Get(ctx, key).Int64()
+		allowed, _ := res.(int64)
+		log.Printf(
+			"Budget check: key=%s, current_usage=%d, request_size=%d, budget=%d, allowed=%v",
+			key, usage, adjSize, budgetBytes, allowed == 1,
+		)
+	}
+
 	if err != nil {
 		// 3. Concurrency-Safe Fail-Open Logic
 		rngMutex.Lock()
@@ -291,6 +303,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		if allowed, _ := res.(int64); allowed == 1 {
 			redisCheckPassed = true
 		} else {
+			log.Printf("Dropping request, budget exceeded for key: %s", key)
 			http.Error(w, "Budget exceeded", http.StatusTooManyRequests)
 			return
 		}
@@ -318,7 +331,6 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 // -----------------------------------------------------------------------------
 // helper fns
 // -----------------------------------------------------------------------------
-
 func getWindowKey() string {
 	now := time.Now().UTC()
 	if budgetWindowType == "daily" {
@@ -342,7 +354,7 @@ func forwardRequest(orig *http.Request, body io.Reader, size int64) (int, error)
 	}
 
 	req.Header = orig.Header.Clone()
-	// 4. Correct Host Header Handling: Let net/http set the Host from the request URL.
+	// Let net/http set the Host from the request URL.
 	req.Host = ""
 	req.Header.Set("Authorization", authToken)
 
