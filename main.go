@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,6 +53,8 @@ var (
 	// Concurrency-safe random number generator for fail-open logic.
 	rng      *rand.Rand
 	rngMutex sync.Mutex
+
+	requestCounter uint64
 )
 
 // -----------------------------------------------------------------------------
@@ -219,6 +222,9 @@ func handleMetricsPassthrough(w http.ResponseWriter, r *http.Request) {
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
+	// Increment our atomic counter for sampling
+	count := atomic.AddUint64(&requestCounter, 1)
+
 	// 1. Content-Type Validation
 	contentType := r.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, "application/json") {
@@ -239,12 +245,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// 2. Large Body Guard: Skip estimator for very large payloads to prevent OOM.
 	const maxBodyForEstimate = 15 * 1024 * 1024 // 15 MiB
 	var adjSize int64
+	var jsonBytes []byte // Declare here to be available for debug logging
+
 	if len(bodyBytes) > maxBodyForEstimate {
 		log.Printf("WARN: Large body (%d bytes), skipping estimator. Billing raw size.", len(bodyBytes))
 		// Fallback to billing raw compressed size + headers
 		adjSize = int64(len(bodyBytes)) + 200
 	} else {
-		var jsonBytes []byte
 		if r.Header.Get("Content-Encoding") == "gzip" {
 			zr, err := gzip.NewReader(bytes.NewReader(bodyBytes))
 			if err != nil {
@@ -266,6 +273,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		// The debug log now includes the total budget for context.
 		debugf("rows=%d raw_uncompressed=%d factor=%.2f adjusted_debit=%d / budget=%d", rows, raw, factor, adjSize, budgetBytes)
 	}
+
+	// --- Debug logging for 1 in 10 requests ---
+	if count%10 == 0 {
+		log.Printf("[SAMPLED_REQUEST] Calculated adjusted_debit: %d", adjSize)
+		log.Printf("[SAMPLED_REQUEST] Full uncompressed JSON payload:\n%s", string(jsonBytes))
+	}
+	// --- END ---
 
 	// --- optimistic budget check ---
 	key := "otel:budget:" + getWindowKey()
