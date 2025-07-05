@@ -61,11 +61,14 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 
 	type scopeSpans struct {
 		Scope struct {
+			Name       string          `json:"name"`
+			Version    string          `json:"version"`
 			Attributes json.RawMessage `json:"attributes"`
 		} `json:"scope"`
 		Spans []json.RawMessage `json:"spans"`
 		Logs  []json.RawMessage `json:"logs"`
 	}
+
 	var env struct {
 		ResourceSpans []struct {
 			Resource struct {
@@ -103,7 +106,9 @@ func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int6
 		}
 	}
 
-	adj = bodiesOnlySize + dupBytes
+	staticOverhead := int64(55) // For __HDX_API_KEY
+	adj = bodiesOnlySize + dupBytes + staticOverhead
+
 	if raw > 0 {
 		factor = float64(adj) / float64(raw)
 	} else {
