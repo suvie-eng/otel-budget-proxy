@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"strconv"
+	"time"
 )
 
 type OtelValue struct {
@@ -17,103 +20,172 @@ type OtelAttribute struct {
 	Value OtelValue `json:"value"`
 }
 
-func getCompactAttributeSize(rawAttrs json.RawMessage) int {
-	if len(rawAttrs) <= 2 {
-		return 0
+type JaegerSpan struct {
+	TraceID       string            `json:"traceID"`
+	SpanID        string            `json:"spanID"`
+	OperationName string            `json:"operationName"`
+	Process       JaegerProcess     `json:"process"`
+	Tags          map[string]string `json:"tags"`
+	JaegerTag     map[string]string `json:"JaegerTag"`
+	StartTime     int64             `json:"startTime"`
+	StartTimeMs   int64             `json:"startTimeMillis"`
+	Timestamp     int64             `json:"timestamp"`
+	Duration      int64             `json:"duration"`
+	Type          string            `json:"type"`
+	Logs          []any             `json:"logs"`
+	References    []any             `json:"references"`
+}
+
+type JaegerProcess struct {
+	ServiceName string            `json:"serviceName"`
+	Tag         map[string]string `json:"tag"`
+	Tags        []any             `json:"tags"`
+}
+
+type ScopeSpan struct {
+	Scope struct {
+		Name    string          `json:"name"`
+		Version string          `json:"version"`
+		Attrs   json.RawMessage `json:"attributes"`
+	} `json:"scope"`
+	Spans []struct {
+		TraceID    string          `json:"traceId"`
+		SpanID     string          `json:"spanId"`
+		Name       string          `json:"name"`
+		Kind       int             `json:"kind"`
+		Attributes json.RawMessage `json:"attributes"`
+	} `json:"spans"`
+}
+
+type ResourceSpans struct {
+	Resource struct {
+		Attributes json.RawMessage `json:"attributes"`
+	} `json:"resource"`
+	ScopeSpans []ScopeSpan `json:"scopeSpans"`
+}
+
+func EstimateHydratedSize(bodyBytes []byte) (int64, float64, int64, int) {
+	var env struct {
+		ResourceSpans []ResourceSpans `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(bodyBytes, &env); err != nil {
+		return int64(len(bodyBytes)), 1.0, int64(len(bodyBytes)), 0
+	}
+
+	var allSpans []JaegerSpan
+
+	for _, rs := range env.ResourceSpans {
+		resAttrs := parseAttributes(rs.Resource.Attributes)
+		serviceName := resAttrs["service.name"]
+		delete(resAttrs, "service.name")
+
+		for _, ss := range rs.ScopeSpans {
+			scopeAttrs := parseAttributes(ss.Scope.Attrs)
+
+			for _, span := range ss.Spans {
+				spanAttrs := parseAttributes(span.Attributes)
+
+				jaegerTag := map[string]string{
+					"otel.library.name":    ss.Scope.Name,
+					"otel.library.version": ss.Scope.Version,
+					"span.kind":            kindToString(span.Kind),
+				}
+				for _, k := range []string{"deployment.environment.name", "net.peer.name", "net.peer.port"} {
+					if v, ok := spanAttrs[k]; ok {
+						jaegerTag[k] = v
+						delete(spanAttrs, k)
+					}
+				}
+				jaegerTag["__HDX_API_KEY"] = "d3f19c25-c4c6-40de-968a-a2a8407eec70"
+
+				now := time.Now().UnixMilli()
+				start := now
+				duration := int64(500)
+
+				allSpans = append(allSpans, JaegerSpan{
+					TraceID:       span.TraceID,
+					SpanID:        span.SpanID,
+					OperationName: span.Name,
+					Tags:          spanAttrs,
+					JaegerTag:     jaegerTag,
+					Process: JaegerProcess{
+						ServiceName: serviceName,
+						Tag:         mergeMaps(resAttrs, scopeAttrs),
+						Tags:        []any{},
+					},
+					StartTime:   start * int64(time.Millisecond),
+					StartTimeMs: start,
+					Timestamp:   start,
+					Duration:    duration,
+					Type:        "jaegerSpan",
+					Logs:        []any{},
+					References:  []any{},
+				})
+			}
+		}
+	}
+
+	var total int64
+	for _, s := range allSpans {
+		b, _ := json.Marshal(s)
+		total += int64(len(b))
+	}
+
+	raw := int64(len(bodyBytes))
+	factor := float64(total) / float64(raw)
+	return raw, factor, total, len(allSpans)
+}
+
+func kindToString(kind int) string {
+	switch kind {
+	case 1:
+		return "internal"
+	case 2:
+		return "server"
+	case 3:
+		return "client"
+	case 4:
+		return "producer"
+	case 5:
+		return "consumer"
+	default:
+		return "unknown"
+	}
+}
+
+func parseAttributes(raw json.RawMessage) map[string]string {
+	out := map[string]string{}
+	if len(raw) <= 2 {
+		return out
 	}
 
 	var verboseAttrs []OtelAttribute
-	if err := json.Unmarshal(rawAttrs, &verboseAttrs); err != nil {
-		return 0
+	if err := json.Unmarshal(raw, &verboseAttrs); err != nil {
+		return out
 	}
 
-	if len(verboseAttrs) == 0 {
-		return 0
-	}
-
-	totalBytes := 2 // for enclosing braces {}
-	for i, attr := range verboseAttrs {
-		totalBytes += len(attr.Key) + 3 // "key":
-
+	for _, attr := range verboseAttrs {
 		if attr.Value.StringValue != nil {
-			totalBytes += len(*attr.Value.StringValue) + 2
+			out[attr.Key] = *attr.Value.StringValue
 		} else if attr.Value.IntValue != nil {
-			totalBytes += len(*attr.Value.IntValue)
+			out[attr.Key] = *attr.Value.IntValue
 		} else if attr.Value.BoolValue != nil {
-			if *attr.Value.BoolValue {
-				totalBytes += 4 // true
-			} else {
-				totalBytes += 5 // false
-			}
+			out[attr.Key] = strconv.FormatBool(*attr.Value.BoolValue)
 		} else if attr.Value.DoubleValue != nil {
-			totalBytes += len(strconv.FormatFloat(*attr.Value.DoubleValue, 'f', -1, 64))
-		}
-
-		if i < len(verboseAttrs)-1 {
-			totalBytes += 1 // comma
+			out[attr.Key] = strconv.FormatFloat(*attr.Value.DoubleValue, 'f', -1, 64)
 		}
 	}
-	return totalBytes
+	return out
 }
 
-func EstimateHydratedSize(bodyBytes []byte) (raw int64, factor float64, adj int64, rows int) {
-	raw = int64(len(bodyBytes))
-
-	type scopeSpans struct {
-		Scope struct {
-			Name       string          `json:"name"`
-			Version    string          `json:"version"`
-			Attributes json.RawMessage `json:"attributes"`
-		} `json:"scope"`
-		Spans []json.RawMessage `json:"spans"`
-		Logs  []json.RawMessage `json:"logs"`
+func mergeMaps(m1, m2 map[string]string) map[string]string {
+	out := make(map[string]string, len(m1)+len(m2))
+	for k, v := range m1 {
+		out[k] = v
 	}
-
-	var env struct {
-		ResourceSpans []struct {
-			Resource struct {
-				Attributes json.RawMessage `json:"attributes"`
-			} `json:"resource"`
-			ScopeSpans []scopeSpans `json:"scopeSpans"`
-		} `json:"resourceSpans"`
+	for k, v := range m2 {
+		out[k] = v
 	}
-
-	if err := json.Unmarshal(bodyBytes, &env); err != nil {
-		factor = 1.0
-		adj = raw
-		return
-	}
-
-	var dupBytes int64
-	bodiesOnlySize := raw
-
-	for _, rs := range env.ResourceSpans {
-		resAttrBlockSize := len(rs.Resource.Attributes)
-		resAttrContentSize := getCompactAttributeSize(rs.Resource.Attributes)
-
-		for _, ss := range rs.ScopeSpans {
-			scopeAttrBlockSize := len(ss.Scope.Attributes)
-			scopeAttrContentSize := getCompactAttributeSize(ss.Scope.Attributes)
-
-			rowCount := len(ss.Spans) + len(ss.Logs)
-			rows += rowCount
-
-			if rowCount > 0 {
-				bodiesOnlySize -= int64(resAttrBlockSize + scopeAttrBlockSize)
-				perRowOverhead := int64(resAttrContentSize + scopeAttrContentSize)
-				dupBytes += perRowOverhead * int64(rowCount)
-			}
-		}
-	}
-
-	staticOverhead := int64(55) // For __HDX_API_KEY
-	adj = bodiesOnlySize + dupBytes + staticOverhead
-
-	if raw > 0 {
-		factor = float64(adj) / float64(raw)
-	} else {
-		factor = 1.0
-	}
-	return
+	return out
 }
 
