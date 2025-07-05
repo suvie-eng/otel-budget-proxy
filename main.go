@@ -222,10 +222,6 @@ func handleMetricsPassthrough(w http.ResponseWriter, r *http.Request) {
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
-	// Increment our atomic counter for sampling
-	// count := atomic.AddUint64(&requestCounter, 1)
-
-	// 1. Content-Type Validation
 	contentType := r.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, "application/json") {
 		http.Error(w, "Unsupported Content-Type: must be application/json", http.StatusUnsupportedMediaType)
@@ -242,14 +238,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Large Body Guard: Skip estimator for very large payloads to prevent OOM.
 	const maxBodyForEstimate = 15 * 1024 * 1024 // 15 MiB
 	var adjSize int64
-	var jsonBytes []byte // Declare here to be available for debug logging
+	var jsonBytes []byte
 
 	if len(bodyBytes) > maxBodyForEstimate {
 		log.Printf("WARN: Large body (%d bytes), skipping estimator. Billing raw size.", len(bodyBytes))
-		// Fallback to billing raw compressed size + headers
 		adjSize = int64(len(bodyBytes)) + 200
 	} else {
 		if r.Header.Get("Content-Encoding") == "gzip" {
@@ -259,7 +253,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			jsonBytes, err = io.ReadAll(zr)
-			zr.Close() // Close the reader as soon as we are done with it.
+			zr.Close()
 			if err != nil {
 				http.Error(w, "failed to decompress gzip body", http.StatusBadRequest)
 				return
@@ -267,29 +261,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			jsonBytes = bodyBytes
 		}
-		// Estimate hydrated size from the uncompressed JSON.
-		raw, factor, adj, rows := EstimateHydratedSize(jsonBytes)
-		adjSize = adj // Assign the calculated adjusted size for the budget check.
-		// The debug log now includes the total budget for context.
-		debugf("rows=%d raw_uncompressed=%d factor=%.2f adjusted_debit=%d / budget=%d", rows, raw, factor, adjSize, budgetBytes)
+
+		estimate := EstimateAll(jsonBytes)
+		adjSize = estimate.AdjustedBytes
+		rows := estimate.SpanCount + estimate.LogCount
+
+		debugf("rows=%d raw_uncompressed=%d factor=%.2f adjusted_debit=%d / budget=%d", rows, estimate.RawBytes, estimate.ExpansionFactor, adjSize, budgetBytes)
 	}
 
-	// --- Debug logging for 1 in 10 requests ---
-	// if count%10 == 0 {
-	// 	log.Printf("[SAMPLED_REQUEST] Calculated adjusted_debit: %d", adjSize)
-	// 	log.Printf("[SAMPLED_REQUEST] Full uncompressed JSON payload:\n%s", string(jsonBytes))
-	// }
-	// --- END ---
-
-	// --- optimistic budget check ---
 	key := "otel:budget:" + getWindowKey()
 	ttl := getWindowTTL().Milliseconds()
 	redisCheckPassed := false
 
 	res, err := checkBudgetScript.Run(ctx, rdb, []string{key}, adjSize, budgetBytes, ttl).Result()
 
-	// This log line is crucial for debugging and is now always on.
-	// It runs regardless of whether the Redis command succeeded or failed.
 	if err == nil {
 		usage, _ := rdb.Get(ctx, key).Int64()
 		allowed, _ := res.(int64)
@@ -300,14 +285,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		// 3. Concurrency-Safe Fail-Open Logic
 		rngMutex.Lock()
 		shouldFailOpen := rng.Float64() < failOpenSampleRate
 		rngMutex.Unlock()
 
 		if failOpenSampleRate > 0 && shouldFailOpen {
 			log.Printf("WARN: Redis unavailable, failing open for request. Error: %v", err)
-			// Fallthrough to forward the request without budget check.
 		} else {
 			log.Printf("ERROR: Redis budget check failed: %v", err)
 			http.Error(w, "error checking budget", http.StatusServiceUnavailable)
@@ -323,14 +306,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// --- forward original (potentially compressed) request ---
 	status, fwdErr := forwardRequest(r, bytes.NewReader(bodyBytes), int64(len(bodyBytes)))
 	if fwdErr != nil || status >= 300 {
 		if redisCheckPassed {
 			_ = rdb.DecrBy(ctx, key, adjSize)
 			debugf("refunded %d from %s due to forwarding error", adjSize, key)
 		}
-
 		if fwdErr != nil {
 			http.Error(w, "failed to forward request", http.StatusBadGateway)
 		} else {
@@ -341,6 +322,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(status)
 }
+
 
 // -----------------------------------------------------------------------------
 // helper fns
