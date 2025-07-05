@@ -6,7 +6,7 @@ import (
 
 // headerConst is a constant estimate for the HTTP request line and headers
 // that wrap the OTLP payload.
-const headerConst = 140
+const headerConst = 0
 
 // EstimateHydratedSize implements the "start-from-zero" calculation to provide
 // a highly accurate estimate of the final ingested data size.
