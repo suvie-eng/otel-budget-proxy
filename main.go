@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
+	// "sync/atomic"
 	"syscall"
 	"time"
 
@@ -223,7 +223,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Increment our atomic counter for sampling
-	count := atomic.AddUint64(&requestCounter, 1)
+	// count := atomic.AddUint64(&requestCounter, 1)
 
 	// 1. Content-Type Validation
 	contentType := r.Header.Get("Content-Type")
@@ -275,10 +275,10 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Debug logging for 1 in 10 requests ---
-	if count%10 == 0 {
-		log.Printf("[SAMPLED_REQUEST] Calculated adjusted_debit: %d", adjSize)
-		log.Printf("[SAMPLED_REQUEST] Full uncompressed JSON payload:\n%s", string(jsonBytes))
-	}
+	// if count%10 == 0 {
+	// 	log.Printf("[SAMPLED_REQUEST] Calculated adjusted_debit: %d", adjSize)
+	// 	log.Printf("[SAMPLED_REQUEST] Full uncompressed JSON payload:\n%s", string(jsonBytes))
+	// }
 	// --- END ---
 
 	// --- optimistic budget check ---
